@@ -1,0 +1,8 @@
+BLIND CRICKET PRO - GITHUB PAGES
+
+1. Upload everything in this folder to your GitHub repository.
+2. Keep index.html at the repository root (or the selected Pages publishing folder).
+3. Keep the entire sounds folder with its subfolders and filenames unchanged.
+4. GitHub: Settings > Pages > Build and deployment > Deploy from a branch > main > /(root) > Save.
+5. Firebase Console: Authentication > Settings > Authorized domains > add your GitHub Pages hostname, e.g. username.github.io.
+6. Open the published HTTPS URL, not a file:// URL.
