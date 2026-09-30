@@ -329,7 +329,7 @@ function saveLocal(){
 function meaningfulProgress(p){return !!p?.uid&&((Number(p.matches)||0)>0||(Number(p.level)||0)>1||(Number(p.xp)||0)>0||(Number(p.balance??2000)!==2000)||(Array.isArray(p.squad)&&p.squad.length>0)||!!p.teamId||(Array.isArray(p.history)&&p.history.length>0)||Object.keys(p.inventory||{}).length>0||!!p.village||!!p.state||!!p.academy||!!p.age||!!p.coach||!!p.offlineTournament)}
 // Snapshot safety: ignore only independent match-checkpoint writes and a save timestamp.
 // Any unknown cloud-side change blocks a full profile write until reconciled.
-function cloudSignature(p){if(!p)return null;const {matchCheckpoint,updatedAt,...data}=p;return JSON.stringify(Object.keys(data).sort().map(key=>[key,data[key]]))}
+function cloudSignature(p){if(!p)return null;const {matchCheckpoint,updatedAt,...data}=p;return JSON.stringify(stableObject(data))}
 function recordCloudBaseline(uid,data){cloudBaseline={uid,signature:cloudSignature(data)}}
 function cloudChanged(uid,data){return cloudBaseline?.uid!==uid||cloudBaseline.signature!==cloudSignature(data)}
 function safeMatchId(){return globalThis.crypto?.randomUUID?.()||"match-"+Date.now()+"-"+Math.random().toString(36).slice(2)}
@@ -358,7 +358,10 @@ async function compareSync(){
  const uid=auth.currentUser?.uid;if(!uid||!profileReady||player.uid!==uid||recoveryBusy)return;
  recoveryBusy=true;
  try{
-  await profileWriteQueue;await matchSaveQueue;
+  await Promise.all([
+    profileWriteQueue.catch(()=>{}),
+    matchSaveQueue.catch(()=>{})
+  ]);
   const snap=await getDocFromServer(doc(db,"players",uid)),cloud=snap.exists()?snap.data():null;
   let device;try{device=JSON.parse(localStorage.getItem(recoverySnapshotKey(uid)+"_latestConflict")||localStorage.getItem(recoverySnapshotKey(uid))||"null")}catch{}
   if(!device||device.uid!==uid)device=player;
@@ -402,11 +405,13 @@ async function restoreChosenDeviceCopy(choiceId){
  const choice=recoveryChoices(uid).find(c=>c.id===choiceId);if(!choice){syncStatus="Matching phone copy not found. Nothing changed.";render();return}
  recoveryBusy=true;
  try{
-  await profileWriteQueue;await matchSaveQueue;
+  await Promise.all([
+    profileWriteQueue.catch(()=>{}),
+    matchSaveQueue.catch(()=>{})
+  ]);
   if(auth.currentUser?.uid!==uid)throw Error("Signed-in account changed.");
   const ref=doc(db,"players",uid),snap=await getDocFromServer(ref),cloud=snap.exists()?snap.data():null;
   if(!cloud)throw Error("Cloud profile is missing. No overwrite performed.");
-  if(cloudSignature(cloud)!==cloudBaseline?.signature)throw Error("Cloud changed since this device loaded. Compare and confirm which copy to keep before restoring.");
   const chosen=JSON.parse(choice.raw);
   if(chosen.uid!==uid||!meaningfulProgress(chosen))throw Error("Phone copy does not belong to this account.");
   const before=syncSummary(cloud),after=syncSummary(chosen);
@@ -761,7 +766,13 @@ async function loadForUser(u){
  adminRecords=[];adminLastDoc=null;adminAllLoaded=false;adminSelectedUid=null;adminError="";
  feedbackRows=[];feedbackLastDoc=null;feedbackAllLoaded=false;feedbackAdminError="";feedbackError="";
  booting=false;finishSignInWait();
- claimDailyLogin(u.uid);setTimeout(async()=>{if(profileReady&&auth.currentUser?.uid===u.uid){await settleLifeMonth();autoCollectGifts()}},1500);
+ claimDailyLogin(u.uid);setTimeout(async()=>{if(profileReady&&auth.currentUser?.uid===u.uid){
+  if(!recoveryBusy && !savedCloudFailure(u.uid) &&
+     !recoveryChoices(u.uid).some(c=>cloudSignature(c.data)!==cloudBaseline?.signature)) {
+   await settleLifeMonth();
+  }
+  autoCollectGifts();
+ }},1500);
  if(lastLoadedAuthUid!==u.uid){lastLoadedAuthUid=u.uid;announce("Google sign-in successful. Welcome back, "+(player.name||"Player")+".",false);setTimeout(()=>{let live=document.getElementById("live-gentle");if(live?.textContent.startsWith("Google sign-in successful."))live.textContent=""},3500)}
  render();
 }
