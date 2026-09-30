@@ -335,6 +335,10 @@ function cloudChanged(uid,data){return cloudBaseline?.uid!==uid||cloudBaseline.s
 function safeMatchId(){return globalThis.crypto?.randomUUID?.()||"match-"+Date.now()+"-"+Math.random().toString(36).slice(2)}
 function syncSummary(p){return "Level "+(p.level||1)+", XP "+(p.xp||0)+", matches "+(p.matches||0)+", squad "+(p.squad?.length||0)+", team "+(p.teamName||"none")+", game money "+(p.balance||0)}
 function recoverySnapshotKey(uid){return "blindCricketRecovery_"+uid}
+function cloudFailureKey(uid){return "blindCricketCloudFailure_"+uid}
+function savedCloudFailure(uid){try{return localStorage.getItem(cloudFailureKey(uid))||""}catch{return ""}}
+function saveCloudFailure(uid,message){try{localStorage.setItem(cloudFailureKey(uid),message)}catch(x){console.warn("Could not keep cloud failure status",x)}}
+function clearCloudFailure(uid){try{localStorage.removeItem(cloudFailureKey(uid))}catch(x){console.warn("Could not clear cloud failure status",x)}}
 function keepRecoveryCopy(local,cloud){
  if(!local?.uid||!meaningfulProgress(local))return;
  const key=recoverySnapshotKey(local.uid),existing=localStorage.getItem(key);
@@ -394,7 +398,7 @@ async function compareRecovery(){
  finally{recoveryBusy=false}
 }
 async function restoreChosenDeviceCopy(choiceId){
- const uid=auth.currentUser?.uid;if(!uid||!isAdmin()||recoveryBusy||!profileReady||player.uid!==uid)return;
+ const uid=auth.currentUser?.uid;if(!uid||recoveryBusy||!profileReady||player.uid!==uid)return;
  const choice=recoveryChoices(uid).find(c=>c.id===choiceId);if(!choice){syncStatus="Matching phone copy not found. Nothing changed.";render();return}
  recoveryBusy=true;
  try{
@@ -428,6 +432,7 @@ async function restoreChosenDeviceCopy(choiceId){
   const [verified,backup]=await Promise.all([getDocFromServer(ref),getDocFromServer(backupRef)]);
   if(!verified.exists()||!backup.exists()||exactProfile(verified.data())!==exactProfile(replacement)||exactProfile(backup.data().profile)!==reviewed)throw Error("Online readback could not verify both the phone profile and cloud backup. Do not retry before checking.");
   if(auth.currentUser?.uid===uid){player={...base,...verified.data(),settings:{...DEFAULT_SETTINGS,...(verified.data().settings||{})}};recordCloudBaseline(uid,verified.data());rememberEconomy(uid,verified.data());saveLocal()}
+  clearCloudFailure(uid);
   syncStatus="Phone copy uploaded and verified. Previous cloud profile is in your private recovery backup. Phone recovery copies were kept.";
   render();announce(syncStatus,true);speak(syncStatus);
  }catch(x){syncStatus="Phone restore stopped ("+(x.code||x.message||"network-error")+"). Local copies were kept. If the network failed after writing, check cloud and backup before retrying.";render();announce(syncStatus,true)}
@@ -450,7 +455,7 @@ function saveMatchCheckpoint(clear=false){
  saveLocal();
  const checkpoint=player.matchCheckpoint,uid=auth.currentUser.uid;
  matchSaveQueue=matchSaveQueue.catch(()=>{}).then(()=>setDoc(doc(db,"players",uid),{matchCheckpoint:checkpoint},{merge:true}))
-  .catch(x=>{err="Match saved on this device, but Firebase checkpoint failed ("+(x.code||"unknown-error")+").";console.error("match checkpoint",x);announce(err,true);msg=err;render()});
+  .catch(x=>{err="Match saved on this device, but Firebase checkpoint failed ("+(x.code||x.message||"unknown-error")+").";saveCloudFailure(uid,err);console.error("match checkpoint",x);announce(err,true);msg=err;render()});
 }
 function resumableMatch(){return player.matchCheckpoint&&player.matchCheckpoint.state&&player.matchCheckpoint.state.match&&!player.matchCheckpoint.state.match.done}
 function resumeMatch(){
@@ -702,8 +707,11 @@ async function pushCloud(){
    }
   }
  });
- try{await profileWriteQueue;if(player.shareWealth)await publishWealth();syncStatus="Cloud save complete for this Google account.";err="";return true}
- catch(x){keepRecoveryCopy(player,null);try{localStorage.setItem(recoverySnapshotKey(player.uid)+"_latestConflict",JSON.stringify(player))}catch(e){console.warn("Could not save latest conflict copy",e)}err="Cloud save failed ("+(x.code||x.message||"unknown-error")+"). Your changes are saved on this device only.";syncStatus=err;console.error("cloud sync failed",x);announce(err,true);return false}
+ try{await profileWriteQueue;if(player.shareWealth)await publishWealth();
+  const divergentRecovery=recoveryChoices(uid).some(c=>cloudSignature(c.data)!==cloudBaseline?.signature);
+  if(!divergentRecovery)clearCloudFailure(uid);
+  syncStatus=divergentRecovery?"Current profile saved online, but a different saved phone copy still needs review. Do not clear browser data.":"Cloud save complete for this Google account.";err="";return true}
+ catch(x){keepRecoveryCopy(player,null);try{localStorage.setItem(recoverySnapshotKey(player.uid)+"_latestConflict",JSON.stringify(player))}catch(e){console.warn("Could not save latest conflict copy",e)}err="Cloud save failed ("+(x.code||x.message||"unknown-error")+"). Your changes are saved on this device only.";syncStatus=err;saveCloudFailure(uid,err);console.error("cloud sync failed",x);announce(err,true);render();return false}
 }
 function confirmTestIdentity(u){
  const key="blindCricketTestApprovedUid";if(sessionStorage.getItem(key)===u.uid)return true;
@@ -726,7 +734,7 @@ async function loadForUser(u){
    }
    const src=cloud; // Authoritative across devices; never silently select stale local state.
    player={...base,...src,sharePublicProfile:src.sharePublicProfile!==false,shareWealth:src.shareWealth===true,lifeAssets:Array.isArray(src.lifeAssets)?src.lifeAssets:[],lifeLedger:Array.isArray(src.lifeLedger)?src.lifeLedger:[],individualRecords:src.individualRecords||{},matchCheckpoint:checkpoint,uid:u.uid,email:u.email||src.email||"",photoURL:u.photoURL||src.photoURL||"",name:src.name||u.displayName||"Player",settings:{...DEFAULT_SETTINGS,...(src.settings||{})},inventory:cloud.inventory||{},balance:cloud.balance??src.balance,formatWins:src.formatWins||{},history:src.history||[],achievements:src.achievements||[],savedPlayers:Array.isArray(src.savedPlayers)?src.savedPlayers:[],friendScores:src.friendScores||{}};
-   syncStatus=localStorage.getItem(recoverySnapshotKey(u.uid))?"Cloud data loaded. A saved device copy is available for review; nothing was uploaded automatically.":"Cloud data loaded for this Google account.";
+   syncStatus=(savedCloudFailure(u.uid)?savedCloudFailure(u.uid)+" ":"")+(recoveryChoices(u.uid).length?"Cloud data loaded. A saved device copy is available for review; nothing was uploaded automatically.":"Cloud data loaded for this Google account.");
    recordCloudBaseline(u.uid,cloud);rememberEconomy(u.uid,cloud);saveLocal();
    if(player.sharePublicProfile)try{await setDoc(doc(db,"publicProfiles",u.uid),publicProfile(player,u.uid))}catch(x){console.warn("public profile publish",x)}
    if(player.shareLeaderboard)try{await setDoc(doc(db,"leaderboard",u.uid),leaderboardProfile(player,u.uid))}catch(x){console.warn("leaderboard publish",x)}
@@ -736,7 +744,7 @@ async function loadForUser(u){
    let local=loadLocal();
    if(local.uid===u.uid&&meaningfulProgress(local))keepRecoveryCopy(local,null);
    player={...base,sharePublicProfile:true,shareWealth:false,matchCheckpoint:local.uid===u.uid?local.matchCheckpoint:null,uid:u.uid,email:u.email||"",photoURL:u.photoURL||"",name:u.displayName||"Player",createdAt:Date.now()};
-   syncStatus=localStorage.getItem(recoverySnapshotKey(u.uid))?"No online profile found. Your saved device copy is preserved for review. Do not log out or clear site data until you have uploaded it.":"No online profile found. Complete onboarding to create one.";
+   syncStatus=(savedCloudFailure(u.uid)?savedCloudFailure(u.uid)+" ":"")+(recoveryChoices(u.uid).length?"No online profile found. Your saved device copy is preserved for review. Do not log out or clear site data until you have uploaded it.":"No online profile found. Complete onboarding to create one.");
    recordCloudBaseline(u.uid,null);rememberEconomy(u.uid,player);saveLocal();
    if(player.sharePublicProfile)try{await setDoc(doc(db,"publicProfiles",u.uid),publicProfile(player,u.uid))}catch(x){console.warn("public profile publish",x)}
    if(player.shareLeaderboard)try{await setDoc(doc(db,"leaderboard",u.uid),leaderboardProfile(player,u.uid))}catch(x){console.warn("leaderboard publish",x)}
@@ -796,16 +804,24 @@ onAuthStateChanged(auth,u=>{
 function gameDay(d=new Date()){return new Intl.DateTimeFormat("en-CA",{timeZone:"Asia/Kolkata",year:"numeric",month:"2-digit",day:"2-digit"}).format(d)}
 function dayBefore(day){const [y,m,d]=day.split("-").map(Number);return new Date(Date.UTC(y,m-1,d-1)).toISOString().slice(0,10)}
 function dailyTarget(day){const n=Number(day.replace(/-/g,""));return 12+(n%4)*2+Math.min(27,Math.max(0,(Number(player?.level)||1)-1)*3)} // In-game target grows 3 runs per career level, capped at +27.
-async function claimDailyLogin(uid){if(dailyClaimBusy||player.loginReward?.day===gameDay())return;dailyClaimBusy=true;const today=gameDay();try{
+async function claimDailyLogin(uid){if(dailyClaimBusy||player.loginReward?.day===gameDay())return;
+ dailyClaimBusy=true;
+ const dailyJob=profileWriteQueue.catch(()=>{}).then(async()=>{
+ const today=gameDay();try{
  const ref=doc(db,"players",uid);
  const result=await runTransaction(db,async tx=>{const snap=await tx.get(ref);if(!snap.exists())return null;const d=snap.data(),prior=d.loginReward||{};if(prior.day===today)return {already:true,prior};
  const streak=prior.day===dayBefore(today)?Math.min(7,(Number(prior.streak)||0)+1):1,bonus=50+10*(streak-1);
  tx.update(ref,{loginReward:{day:today,streak},balance:(Number(d.balance)||0)+bonus});return {streak,bonus}});
  if(auth.currentUser?.uid!==uid||!result)return;
  if(result.already){player.loginReward=result.prior;return}
- try{const saved=await getDocFromServer(ref);if(saved.exists()&&auth.currentUser?.uid===uid)recordCloudBaseline(uid,saved.data())}catch(e){console.warn("Could not refresh cloud baseline after login reward",e)}
- player.loginReward={day:today,streak:result.streak};player.balance+=result.bonus;lastEconomySync.balance+=result.bonus;saveLocal();announce("Daily login: "+money(result.bonus)+" game money. Streak "+result.streak+" days.",true);render();
- }catch(x){console.warn("daily login reward",x);announce("Daily login reward could not sync. Try again later.",true)}finally{dailyClaimBusy=false}
+ const saved=await getDocFromServer(ref);
+ if(!saved.exists()||auth.currentUser?.uid!==uid)throw Error("Could not verify daily login reward online.");
+ recordCloudBaseline(uid,saved.data());rememberEconomy(uid,saved.data());
+ player.loginReward={day:today,streak:result.streak};player.balance=saved.data().balance;saveLocal();announce("Daily login: "+money(result.bonus)+" game money. Streak "+result.streak+" days.",true);render();
+ }catch(x){console.warn("daily login reward",x);syncStatus="Daily login reward could not be verified ("+(x.code||x.message||"network-error")+"). Compare cloud and phone copies before another save.";saveCloudFailure(uid,syncStatus);announce(syncStatus,true);render()}
+ });
+ profileWriteQueue=dailyJob;
+ try{await dailyJob}finally{dailyClaimBusy=false}
 }
 async function loadLeaderboard(force=false){const today=gameDay();if(!force&&leaderboardLoadedDay===today){render();return}
  try{const snap=await getDocs(query(collection(db,"leaderboard"),orderBy("wins","desc"),limit(10)));leaderboardRows=snap.docs.map(d=>d.data());leaderboardLoadedDay=today;leaderboardError=""}
@@ -2245,7 +2261,7 @@ function bind(){
  let review=document.getElementById("reviewRecovery");if(review)review.onclick=reviewRecovery;
  let syncCompare=document.getElementById("compareSync");if(syncCompare)syncCompare.onclick=compareSync;
  let compare=document.getElementById("compareRecovery");if(compare)compare.onclick=compareRecovery;
- document.querySelectorAll("[data-restore-choice]").forEach(b=>{b.disabled=!isAdmin();b.onclick=()=>restoreChosenDeviceCopy(b.dataset.restoreChoice)});
+ document.querySelectorAll("[data-restore-choice]").forEach(b=>{b.disabled=!auth.currentUser||!profileReady||player.uid!==auth.currentUser.uid;b.onclick=()=>restoreChosenDeviceCopy(b.dataset.restoreChoice)});
  document.querySelectorAll("[data-p]").forEach(b=>b.onclick=()=>{
   let mode=b.dataset.mode;
   if(mode)matchSetupState.mode=mode;
@@ -2273,7 +2289,7 @@ function bind(){
   if(want&&!confirm("Share your name, virtual net worth and asset counts with signed-in players?"))return;
   if(want===player.shareWealth)return;
   if(want){player.shareWealth=true;
-   if(!await pushCloud()){player.shareWealth=false;wealthError="Sharing could not be saved online. Check cloud status."}
+   if(!await pushCloud()){player.shareWealth=false;wealthError="Sharing was not saved: "+(err||syncStatus||"Check cloud status.")}
    else {try{const snap=await getDocFromServer(doc(db,"wealthLeaderboard",uid));if(!snap.exists())throw Error("Wealth entry missing");wealthError="Wealth sharing is on."}
     catch(x){wealthError="Sharing preference saved, but ranking entry could not be verified. Retry or turn it off."}}
   }else{
