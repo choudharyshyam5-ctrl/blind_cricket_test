@@ -680,7 +680,7 @@ function clipFallbacks(eventKey,selected,dismissalType){
 }
 const impactAudio=new Audio();impactAudio.preload="auto";impactAudio.src=soundUrl("extra/hit.mp3");
 function playImpact(){if(!player.settings.sfx)return;try{impactAudio.pause();impactAudio.currentTime=0;impactAudio.volume=Math.max(0,Math.min(1,player.settings.sfxVolume??.8));impactAudio.play().catch(()=>{})}catch(x){console.warn("impact audio",x)}}
-function playClip(eventKey,dismissalType,onUnavailable){
+function playClip(eventKey,dismissalType,onUnavailable,onComplete){
  if(match?.done)return false;
  if(!player.settings.commentary)return false;
  const clip=dismissalType?pickDismissalClip(dismissalType):pickClip(eventKey);
@@ -688,7 +688,7 @@ function playClip(eventKey,dismissalType,onUnavailable){
  if(!paths.length){commentaryTalking=false;if(!onUnavailable)announce("No recording available for "+eventKey+". The text commentary is shown.",false);return false}
  const generation=++clipGeneration;
  commentaryTalking=true;
- commentaryAudio.onended=()=>{if(generation===clipGeneration){commentaryTalking=false;completeFinalAudio()}};
+ commentaryAudio.onended=()=>{if(generation===clipGeneration){commentaryTalking=false;completeFinalAudio();if(onComplete)onComplete()}};
  let attempt=0;
  commentaryAudio.pause();commentaryAudio.onerror=null;
  try{commentaryAudio.currentTime=0}catch{}
@@ -1197,6 +1197,27 @@ function teamBowlPlanReady(){
 }
 function testBallsLeft(){return 2700-(match.testBallsUsed||0)}
 function testTarget(side){return (side==="player"?match.aiTotal:match.playerTotal)-(side==="player"?match.playerTotal:match.aiTotal)+1}
+function testSituationParts(){
+ const inn=currentInnings(),n=match.innings;
+ const pT=match.playerTotal+(match.current==="player"?inn.runs:0),aT=match.aiTotal+(match.current==="ai"?inn.runs:0);
+ const wl=Math.max(0,wicketsLimit()-inn.wickets),batter=match.current==="player"?"You":"Opponent";
+ if(n===4&&match.target!=null){const need=Math.max(0,match.target-inn.runs);return{kind:"chase",text:"Target "+match.target+". "+batter+(batter==="You"?" need ":" needs ")+need+" more run"+(need===1?"":"s")+" with "+wl+" wicket"+(wl===1?"":"s")+" left."}}
+ if(n===1)return{kind:"first",text:(match.current==="player"?"You have ":"Opponent has ")+inn.runs+" for "+inn.wickets+" in the first innings."};
+ const d=pT-aT;
+ if(d>0)return{kind:"lead",text:"You lead by "+d+" run"+(d===1?"":"s")+"."};
+ if(d<0)return{kind:"trail",text:"You trail by "+(-d)+" run"+(d===-1?"":"s")+"."};
+ return{kind:"level",text:"Scores are level."};
+}
+function testSituation(){return isTest()&&match&&!match.awaitingTossChoice?testSituationParts().text:""}
+function announceTestSituation(urgent){const t=testSituation();if(t)announce("Match situation. "+t,!!urgent)}
+function maybeAnnounceTestSituation(){
+ if(!isTest()||!match||match.done)return;const inn=currentInnings(),p=testSituationParts();
+ const overKey=match.innings+":"+Math.floor(inn.balls/6),overEnded=inn.balls>0&&inn.balls%6===0&&match.lastSituationOver!==overKey;
+ const changed=match.lastSituationKind!==undefined&&match.lastSituationKind!==p.kind&&p.kind!=="first";
+ match.lastSituationKind=p.kind;
+ if(overEnded){match.lastSituationOver=overKey}
+ if(overEnded||changed)announce("Match situation. "+p.text,false);
+}
 function testStatus(){return "Test innings "+match.innings+" of 4. Total overs remaining "+Math.floor(testBallsLeft()/6)+"."+
  " Player total "+(match.playerTotal+(match.current==="player"?currentInnings().runs:0))+". Opponent total "+(match.aiTotal+(match.current==="ai"?currentInnings().runs:0))+"."+(match.innings===4?" Target "+match.target+".":"")}
 
@@ -1382,11 +1403,19 @@ function startMatch(){
  };
  activeCommentaryPack=pickPackForSetting(player.settings.commentator);
  if(isTeamMode(m.mode))initTeamScore();
- syncBgm();playClip("toss");
+ syncBgm();
  page="match";
  saveMatchCheckpoint();
  render();
- speak(match.text);
+ // Read the toss instruction after the coin audio, never during commentary.
+ // Ignore a late audio callback if the player has already chosen or left.
+ const tossMatchId=match.id,tossText=match.text;
+ let tossInstructionRead=false;
+ const readTossInstruction=()=>{
+  if(tossInstructionRead||page!=="match"||!match||match.done||match.id!==tossMatchId||match.text!==tossText||(userWinsToss&&!match.awaitingTossChoice))return;
+  tossInstructionRead=true;speak(tossText);
+ };
+ if(!playClip("toss",null,readTossInstruction,readTossInstruction))readTossInstruction();
 }
 function chooseTossAction(action){
  if(!canChangeProfile()||!match||match.done||!match.awaitingTossChoice||!["bat","bowl"].includes(action))return;
@@ -1504,7 +1533,7 @@ function afterBall(){
   if(inn.wickets>=10){endInnings("allout");return}
   if(testBallsLeft()<=0){if(isTeamMode(matchSetupState.mode))captureTeamInnings(match.current,currentInnings());if(match.current==="player")match.playerTotal+=currentInnings().runs;else match.aiTotal+=currentInnings().runs;finishMatch("time");return}
   if(maybeAiDeclare())return;
-  saveMatchCheckpoint();render();return;
+  maybeAnnounceTestSituation();saveMatchCheckpoint();render();return;
  }
  let chasing=match.innings>1&&match.target!=null;
  let over=inn.balls>=(match.superOver&&match.innings>=3?6:ballsLimit())||inn.wickets>=wicketsLimit()||(chasing&&inn.runs>=match.target);
@@ -1555,9 +1584,9 @@ function beginTestInnings(side,prefix=""){
  match.current=side;
  match.sides[side]=newInningsState();
  if(isTeamMode(matchSetupState.mode)){if(side==="player")resetTeamBatters();else match.teamBowling={selected:null,lastOver:null,over:-1,b1Overs:0,freeHitPending:false}}
- match.target=match.innings===4?testTarget(side):null;
+ match.target=match.innings===4?testTarget(side):null;match.lastSituationKind=undefined;
  match.text=prefix+"Test innings "+match.innings+". "+(side==="player"?"You are batting.":"The opponent is batting.")+
- (match.target!=null?" Target "+match.target+".":"")+" "+testStatus();
+ (match.target!=null?" Target "+match.target+".":"")+" "+testStatus()+" "+testSituation();
  announce(match.text,true);speak(match.text);saveMatchCheckpoint();render();document.getElementById("matchHeading")?.focus();
 }
 function endTestInnings(reason){
@@ -2441,7 +2470,7 @@ function matchScreen(){
  if(match.awaitingTossChoice)return tossChoiceScreen();
  let side=match.current,inn=currentInnings();
  let ballsLeft=ballsLimit()-inn.balls;
- let header=(match.dailyEligible?'<p role="status">Daily target: '+dailyTarget(match.dailyDay)+' runs in this 3-over match, reward '+money(150)+'.</p>':'')+(match.friendChallengeId?'<p role="status">Friend challenge: score at least 30 runs in 3 overs. One attempt only.</p>':'')+(match.superOver?'<p role="status">Super Over. One over each; second tie is a draw.</p>':'')+(isTest()?'<p role="status">'+e(testStatus())+'</p>':'')+(isTournamentMode(matchSetupState.mode)?'<p role="status">Tournament round '+player.offlineTournament.round+' of '+player.offlineTournament.requiredWins+'. Opponent: '+e(opponentLabel(match.opponentTeam))+'.</p>':'')+'<div class="grid"><div class="card"><span class="muted">Score</span><div class="stat">'+inn.runs+'/'+inn.wickets+'</div><p>Over '+Math.floor(inn.balls/6)+'.'+(inn.balls%6)+'; '+(isTest()?Math.floor(match.testBallsUsed/6)+'.'+(match.testBallsUsed%6)+' of 450 overs used in match': 'of '+matchSetupState.overs+' overs per innings')+'</p></div>'
+ let header=(match.dailyEligible?'<p role="status">Daily target: '+dailyTarget(match.dailyDay)+' runs in this 3-over match, reward '+money(150)+'.</p>':'')+(match.friendChallengeId?'<p role="status">Friend challenge: score at least 30 runs in 3 overs. One attempt only.</p>':'')+(match.superOver?'<p role="status">Super Over. One over each; second tie is a draw.</p>':'')+(isTest()?'<p role="status">'+e(testStatus())+'</p><p id="testSituation"><strong>Match situation:</strong> '+e(testSituation())+'</p>':'')+(isTournamentMode(matchSetupState.mode)?'<p role="status">Tournament round '+player.offlineTournament.round+' of '+player.offlineTournament.requiredWins+'. Opponent: '+e(opponentLabel(match.opponentTeam))+'.</p>':'')+'<div class="grid"><div class="card"><span class="muted">Score</span><div class="stat">'+inn.runs+'/'+inn.wickets+'</div><p>Over '+Math.floor(inn.balls/6)+'.'+(inn.balls%6)+'; '+(isTest()?Math.floor(match.testBallsUsed/6)+'.'+(match.testBallsUsed%6)+' of 450 overs used in match': 'of '+matchSetupState.overs+' overs per innings')+'</p></div>'
   +'<div class="card"><span class="muted">'+(match.target!=null&&match.innings>1?"Target":"Innings")+'</span><div class="stat">'+(match.target!=null&&match.innings>1?match.target:(match.innings+"/"+match.maxInnings))+'</div></div></div>';
  let teamBatter=currentTeamBatter();
  let teamStatus=isTeamMode(matchSetupState.mode)&&side==="player"&&teamBatter?'<div class="card"><b>On strike: '+e(teamBatter.name)+' ('+e(teamBatter.cat)+')</b><p>Non-striker: '+e(match.teamBatting.lineup[match.teamBatting.nonStriker]?.name||"None")+'. Next batter: your choice after a wicket'+'. Wickets: '+inn.wickets+'/10. B1 doubles the runs credited for the shot.</p></div>':'';
@@ -2470,7 +2499,7 @@ function matchScreen(){
    +'</div>';
  }
  return topBar()+'<div class="screen"><h1 id="matchHeading" tabindex="-1">🏏 '+(side==="player"?"You Are Batting":"You Are Bowling")+'</h1><button id="matchBgmToggle" type="button" aria-pressed="'+(player.settings.bgm?'true':'false')+'">Background music '+(player.settings.bgm?'on':'off')+'</button><label>Background music volume (0 to 100 percent)<input id="matchBgmVolume" type="range" min="0" max="1" step=".05" value="'+(player.settings.bgmVolume??.25)+'"></label>'+header+teamStatus+commentary+controls+
- (testCanDeclare()?'<button id="declareTest" class="secondary" aria-label="Declare this Test innings after at least one over">Declare innings</button>':'')+'<div class="log" style="margin-top:14px">'+match.log.map(l=>'<div class="tag" style="display:block;margin:4px 0">'+e(l)+'</div>').join("")+'</div><button class="secondary" id="quitMatchBtn" style="margin-top:14px">Quit Match</button></div>';
+ (isTest()?'<button id="testSituationBtn" type="button" class="secondary" aria-keyshortcuts="L">Match situation</button> ':'')+(testCanDeclare()?'<button id="declareTest" class="secondary" aria-label="Declare this Test innings after at least one over">Declare innings</button>':'')+'<div class="log" style="margin-top:14px">'+match.log.map(l=>'<div class="tag" style="display:block;margin:4px 0">'+e(l)+'</div>').join("")+'</div><button class="secondary" id="quitMatchBtn" style="margin-top:14px">Quit Match</button></div>';
 }
 function quitMatch(){
  if(!canChangeProfile()){announce("Wait for your approved profile or recovery to finish.",true);return}
@@ -2924,6 +2953,7 @@ function bind(){
  document.querySelectorAll("[data-toss]").forEach(b=>b.onclick=()=>{matchSetupState.toss=b.dataset.toss;render()});
  let batFirst=document.getElementById("chooseBatFirst"),bowlFirst=document.getElementById("chooseBowlFirst");if(batFirst)batFirst.onclick=()=>chooseTossAction("bat");if(bowlFirst)bowlFirst.onclick=()=>chooseTossAction("bowl");
  let bm=document.getElementById("beginMatch");if(bm)bm.onclick=startMatch;
+ let tsb=document.getElementById("testSituationBtn");if(tsb)tsb.onclick=()=>announceTestSituation(true);
  let dec=document.getElementById("declareTest");if(dec)dec.onclick=()=>{if(testCanDeclare()&&confirm("Are you sure you want to declare this innings?"))declareTestInnings()};
  let enforce=document.getElementById("enforceFollowOn");if(enforce)enforce.onclick=()=>{if(followOnAllowed()&&confirm("Are you sure you want to enforce the follow-on?"))chooseFollowOn(true)};
  let decline=document.getElementById("declineFollowOn");if(decline)decline.onclick=()=>{if(followOnAllowed()&&confirm("Are you sure you want to bat again instead of enforcing the follow-on?"))chooseFollowOn(false)};
@@ -3014,6 +3044,7 @@ window.addEventListener("keydown",(ev)=>{
  if(match.awaitingFollowOn||match.awaitingTossChoice||teamChoicePending())return;
  if(ev.key.toLowerCase()==="b"&&!ev.ctrlKey&&match.current==="player"){ev.preventDefault();doPlayerShot("single")}
  else if(ev.key.toLowerCase()==="b"&&ev.ctrlKey&&match.current==="ai"){ev.preventDefault();doPlayerBowl("straight")}
+ else if(ev.key.toLowerCase()==="l"&&!ev.ctrlKey&&isTest()){ev.preventDefault();announceTestSituation(true)}
  else if(ev.key.toLowerCase()==="a"){let inn=currentInnings();announce("Score "+inn.runs+" for "+inn.wickets+", over "+Math.floor(inn.balls/6)+"."+(inn.balls%6),true)}
 });
 
